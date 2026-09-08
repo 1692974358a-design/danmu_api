@@ -1,44 +1,294 @@
-name: Fork Sync
+name: Sync Fork (perfect edition)
 
-permissions:
-    contents: write
 
 on:
-    schedule:
-        - cron: "0 0 * * *"  # 每天午夜执行
-    workflow_dispatch:  # 允许手动触发
+
+  schedule:
+    - cron: "0 16 * * *"   # 北京时间 00:00
+
+  workflow_dispatch:
+
+
+
+permissions:
+
+  contents: write
+
+
 
 jobs:
-    sync_with_upstream:
-        name: Sync with Upstream
-        runs-on: ubuntu-latest
-        if: ${{ github.event.repository.fork }}
 
-        steps:
-            - name: Checkout target repo
-              uses: actions/checkout@v4
-              with:
-                token: ${{ secrets.GITHUB_TOKEN }}
+  sync:
 
-            - name: Sync Upstream
-              uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
-              with:
-                  target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-                  upstream_sync_repo: huangxd-/danmu_api
-                  upstream_sync_branch: main
-                  target_sync_branch: main
-                  test_mode: false
+    runs-on: ubuntu-latest
 
-            - name: Check for new commits
-              if: success()
-              run: echo "Sync completed successfully"
 
-            - name: Check for Failure
-              if: failure()
-              run: |
-                  echo "[Error] Sync failed. This might be due to:"
-                  echo "1. Changes in the upstream workflow file"
-                  echo "2. Merge conflicts that need manual resolution"
-                  echo "3. Network issues"
-                  echo "Please check the logs and consider manual sync if needed."
-                  exit 1
+    steps:
+
+
+      # ① Checkout ci
+      - name: Checkout ci branch
+        uses: actions/checkout@v4
+        with:
+
+          ref: ci
+
+          fetch-depth: 0
+
+
+
+      # ② Git身份
+      - name: Set git identity
+        run: |
+
+          git config --global user.name "github-actions[bot]"
+
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+
+      # ③ 添加 upstream
+      - name: Add upstream
+        run: |
+
+          git remote add upstream https://github.com/huangxd-/danmu_api.git || true
+
+          git fetch upstream main
+
+
+
+      # ④ 读取 upstream VERSION + COMMIT
+      - name: Read upstream info
+        id: upstream
+        shell: bash
+        run: |
+
+
+          VERSION=$(git show upstream/main:danmu_api/configs/globals.js \
+          | awk -F"'" '/^[[:space:]]*VERSION:[[:space:]]*'\''[^'\'']+'\''/ {print $2; exit}')
+
+
+          if [ -z "$VERSION" ]; then
+
+            echo "ERROR: upstream VERSION parse failed"
+
+            exit 1
+
+          fi
+
+
+          COMMIT=$(git rev-parse upstream/main)
+
+
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+
+
+
+          echo "UP VERSION=$VERSION"
+
+          echo "UP COMMIT=$COMMIT"
+
+
+
+
+      # ⑤ 读取当前 ci VERSION + COMMIT
+      - name: Read local info
+        id: local
+        shell: bash
+        run: |
+
+
+          VERSION=$(awk -F"'" \
+          '/^[[:space:]]*VERSION:[[:space:]]*'\''[^'\'']+'\''/ {print $2; exit}' \
+          danmu_api/configs/globals.js)
+
+
+
+          if [ -z "$VERSION" ]; then
+
+            echo "ERROR: local VERSION parse failed"
+
+            exit 1
+
+          fi
+
+
+
+          COMMIT=$(git rev-parse HEAD)
+
+
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+
+
+
+          echo "CI VERSION=$VERSION"
+
+          echo "CI COMMIT=$COMMIT"
+
+
+
+
+      # ⑥ 判断是否变化
+      - name: Decide build
+        id: decide
+        run: |
+
+
+          if [ \
+          "${{ steps.upstream.outputs.version }}" != "${{ steps.local.outputs.version }}" \
+          ] || \
+          [ \
+          "${{ steps.upstream.outputs.commit }}" != "${{ steps.local.outputs.commit }}" \
+          ]
+
+          then
+
+
+            echo "changed=true" >> $GITHUB_OUTPUT
+
+            echo "Need sync and build"
+
+
+
+          else
+
+
+            echo "changed=false" >> $GITHUB_OUTPUT
+
+            echo "No changes"
+
+
+
+          fi
+
+
+
+
+
+      # ⑦ 备份 workflows
+      - name: Backup workflows
+        run: |
+
+
+          mkdir -p /tmp/workflows_backup
+
+
+          cp -a .github/workflows \
+          /tmp/workflows_backup/ 2>/dev/null || true
+
+
+
+
+
+      # ⑧ 同步 upstream
+      - name: Hard sync upstream
+        run: |
+
+
+          git reset --hard upstream/main
+
+
+
+
+
+      # ⑨ 恢复 workflows
+      - name: Restore workflows
+        run: |
+
+
+          rm -rf .github/workflows
+
+
+          mkdir -p .github
+
+
+          cp -a \
+          /tmp/workflows_backup/workflows \
+          .github/ 2>/dev/null || true
+
+
+
+
+
+      # ⑩ 提交 workflow 恢复
+      - name: Commit workflows
+        run: |
+
+
+          git add .github/workflows || true
+
+
+          git diff --cached --quiet \
+          || git commit -m "restore workflows"
+
+
+
+
+
+      # ⑪ 判断是否需要 push
+      - name: Check push
+        id: pushcheck
+        run: |
+
+
+          LOCAL=$(git rev-parse HEAD)
+
+
+          REMOTE=$(git ls-remote origin ci | awk '{print $1}')
+
+
+
+          echo "LOCAL=$LOCAL"
+
+          echo "REMOTE=$REMOTE"
+
+
+
+          if [ "$LOCAL" != "$REMOTE" ]
+
+          then
+
+            echo "push=true" >> $GITHUB_OUTPUT
+
+
+          else
+
+            echo "push=false" >> $GITHUB_OUTPUT
+
+
+          fi
+
+
+
+
+
+      # ⑫ 推送 ci
+      - name: Push ci
+        if: steps.pushcheck.outputs.push == 'true'
+        run: |
+
+
+          git push origin ci --force-with-lease
+
+
+
+
+
+      # ⑬ 触发 Docker 构建
+      - name: Trigger build
+        if: steps.decide.outputs.changed == 'true'
+        run: |
+
+
+          curl \
+          -X POST \
+          -H "Authorization: Bearer ${{ secrets.PAT_TOKEN }}" \
+          -H "Accept: application/vnd.github+json" \
+          https://api.github.com/repos/${{ github.repository }}/dispatches \
+          -d '{"event_type":"build_from_upstream"}'
